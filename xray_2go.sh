@@ -422,7 +422,7 @@ if [ $? -eq 0 ]; then
         systemctl restart caddy
     fi
 else
-    [ -f /etc/alpine-release ] && rc-service caddy restart > /dev/null 2>&1 || red "Caddy 配置文件验证失败，订阅功能可能无法使用，但不影响节点使用\nissues 反馈：https://github.com/eooce/xray-argo/issues\n"
+    [ -f /etc/alpine-release ] && rc-service caddy restart > /dev/null 2>&1 || red "Caddy 配置文件验证失败，订阅功能可能无法使用，但不影响节点使用\n"
 fi
 }
 
@@ -678,7 +678,7 @@ create_shortcut() {
   cat > "$work_dir/2go.sh" << EOF
 #!/usr/bin/env bash
 
-bash <(curl -Ls https://github.com/eooce/xray-2go/raw/main/xray_2go.sh) \$1
+bash <(curl -Ls https://github.com/windyhan/xray-2go/raw/main/xray_2go.sh) \$1
 EOF
   chmod +x "$work_dir/2go.sh"
   ln -sf "$work_dir/2go.sh" /usr/bin/2go
@@ -1033,7 +1033,31 @@ change_argo_domain() {
 # 查看节点信息和订阅链接
 check_nodes() {
 if [ ${check_xray} -eq 0 ]; then
-    while IFS= read -r line; do purple "${purple}$line"; done < ${work_dir}/url.txt
+    # 1. 每次查看节点时，实时从 argo.log 校验并提取最新临时域名
+    if [ -f "${work_dir}/argo.log" ]; then
+        current_domain=$(sed -n 's|.*https://\([^/]*trycloudflare\.com\).*|\1|p' "${work_dir}/argo.log" | tail -n 1)
+        if [ -n "$current_domain" ]; then
+            # 复用已有的更新逻辑，实时重写 url.txt 和 sub.txt
+            ArgoDomain="$current_domain"
+            sed -i "5s/sni=[^&]*/sni=$ArgoDomain/; 5s/host=[^&]*/host=$ArgoDomain/" "${work_dir}/url.txt"
+            content=$(cat "$client_dir")
+            vmess_urls=$(grep -o 'vmess://[^ ]*' "$client_dir")
+            for vmess_url in $vmess_urls; do
+                decoded_vmess=$(echo "${vmess_url#vmess://}" | base64 --decode)
+                updated_vmess=$(echo "$decoded_vmess" | jq --arg new_domain "$ArgoDomain" '.host = $new_domain | .sni = $new_domain')
+                encoded_updated_vmess=$(echo "$updated_vmess" | base64 | tr -d '\n')
+                new_vmess_url="vmess://$encoded_updated_vmess"
+                content=$(echo "$content" | sed "s|$vmess_url|$new_vmess_url|")
+            done
+            echo "$content" > "$client_dir"
+            base64 -w0 ${work_dir}/url.txt > ${work_dir}/sub.txt
+        fi
+    fi
+
+    # 2. 正常展示最新的 4 个节点及订阅信息
+    clear
+    green "=== 最新节点信息（已自动同步当前Argo隧道域名） ===\n"
+    while IFS= read -r line; do purple "$line"; done < ${work_dir}/url.txt
     server_ip=$(get_realip)
     sub_port=$(sed -n 's/.*:\([0-9]\+\).*/\1/p' /etc/caddy/Caddyfile)
     lujing=$(sed -n 's/.*handle \/\([a-zA-Z0-9]\+\).*/\1/p' /etc/caddy/Caddyfile)
